@@ -27,3 +27,6 @@ music_library/
 
 # Submodule ignores the above, but keep the submodule itself
 OpenMontage/
+
+# Video Renders
+**/final.mp4

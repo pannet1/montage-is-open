@@ -50,8 +50,8 @@ def step_setup():
 
     print("  Installing Python dependencies (via uv)...")
     run("uv pip install -r requirements.txt", cwd=OM)
-    print("  Installing Remotion composer (npm)...")
-    run("npm install", cwd=OM / "remotion-composer")
+    print("  Installing Remotion composer (bun)...")
+    run("bun install", cwd=OM / "remotion-composer")
     run("uv pip install piper-tts 2>/dev/null || echo '  [skip] piper-tts — cloud TTS still works'")
 
     env_path = HERE / ".env"
