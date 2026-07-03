@@ -1,0 +1,98 @@
+identity:
+  name: "Custom EcomSense"
+  category: custom
+  mood: technical, clean, fast
+  pace: moderate
+  best_for: "Hosting, VPS plans, algorithmic trading, finance tech"
+
+visual_language:
+  color_palette:
+    primary: ["#2563EB", "#3B82F6"]
+    accent: ["#34D399", "#10B981"]
+    background: "#020617"
+    text: "#FFFFFF"
+    muted: "#94A3B8"
+  composition: centered, clean grids
+  texture: flat dark theme, no grain
+
+typography:
+  headings:
+    font: "Inter, system-ui, sans-serif"
+    weight: 800
+    tracking: "-0.03em"
+  body:
+    font: "Inter, system-ui, sans-serif"
+    weight: 400
+    line_height: 1.6
+  code:
+    font: "JetBrains Mono, monospace"
+    weight: 400
+  stat_card:
+    font: "Inter, system-ui, sans-serif"
+    weight: 800
+    size_multiplier: 3.0
+  scale_system: "major_third"
+  weight_matrix:
+    title: 900
+    heading: 800
+    body: 400
+    caption: 400
+
+motion:
+  transitions: [fade, slide-left]
+  animation_style: "ease-in-out, spring, snap"
+  pacing_rules:
+    min_scene_hold_seconds: 2.0
+    max_scene_hold_seconds: 15
+    text_card_hold_seconds: 3.0
+    stat_card_hold_seconds: 3.0
+    transition_duration_seconds: 0.3
+  entrance: "slide-up with spring (0.95 -> 1.0)"
+  exit: "fade-out"
+
+audio:
+  voice_style: "clear, reassuring, professional, tech"
+  music_mood: "lo-fi corporate electronic, tech beat"
+  music_volume: 0.12
+  sfx_style: "none"
+  ducking_threshold_db: -3
+
+asset_generation:
+  image_prompt_prefix: "dark flat vector illustration of tech, slate blue and green accent colors, dark background, "
+  image_negative_prompt: "photorealistic, bright, white background, sketchy, messy"
+  diagram_style: "clean lines, dark slate background, glowing nodes"
+  consistency_anchors:
+    - "Dark background (#020617) throughout"
+    - "Blue (#2563EB) and Emerald (#34D399) as accent colors"
+
+overlays:
+  stat_card:
+    bg: "#0F172A"
+    border: "#2563EB"
+    radius: 12
+    shadow: "0 4px 16px rgba(0,0,0,0.2)"
+  key_term:
+    bg: "#1E293B"
+    text: "#60A5FA"
+    radius: 6
+  code_block:
+    bg: "#0F172A"
+    text: "#F8FAFC"
+    highlight: "#34D399"
+
+quality_rules:
+  - "Dark theme matches ecomsense.in colors exactly"
+  - "WCAG AA contrast compliant"
+  - "Clean fonts"
+
+chart_palette:
+  - "#2563EB"
+  - "#34D399"
+  - "#60A5FA"
+  - "#10B981"
+  - "#F59E0B"
+
+color_rules:
+  harmony_type: "complementary"
+  contrast_validation: true
+  colorblind_safe: true

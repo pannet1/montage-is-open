@@ -30,3 +30,7 @@ OpenMontage/
 
 # Video Renders
 **/final.mp4
+
+# Data files
+data/
+
