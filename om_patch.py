@@ -216,37 +216,63 @@ try:
 except Exception as e:
     print(f"[OM Patch] Failed to register custom FishSpeechTTS: {e}")
 
-# 6. Patch LocalDiffusion to support SDXL from local .safetensors file
+# 6. Patch LocalDiffusion to use local SDXL .safetensors model automatically
+#    No config needed — drops in place of external API image providers.
 try:
+    import os as _os
+    from pathlib import Path as _Path
+    from tools.base_tool import ToolResult, ToolStatus
     from tools.graphics.local_diffusion import LocalDiffusion
 
-    _orig_local_execute = LocalDiffusion.execute
+    # Default local SDXL model path — override via SDXL_MODEL_PATH env var
+    _SDXL_DEFAULT = _os.environ.get(
+        "SDXL_MODEL_PATH",
+        _os.path.expanduser("~/Downloads/DreamShaperXL_Lightning.safetensors"),
+    )
+    _SDXL_PATH = _Path(_SDXL_DEFAULT)
 
-    def _patched_local_execute(self, inputs: dict) -> ToolResult:
-        import time
-        from pathlib import Path
+    # Patch get_status — AVAILABLE when model file exists + diffusers installed
+    _orig_status = LocalDiffusion.get_status
 
-        model_id = inputs.get("model", "stabilityai/stable-diffusion-2-1-base")
+    def _patched_status(self) -> ToolStatus:
+        if not _SDXL_PATH.exists():
+            return _orig_status(self)
+        try:
+            import diffusers  # noqa: F401
+            import torch  # noqa: F401
+            return ToolStatus.AVAILABLE
+        except ImportError:
+            return ToolStatus.UNAVAILABLE
+
+    LocalDiffusion.get_status = _patched_status
+
+    # Patch input_schema default model to local SDXL path
+    LocalDiffusion.input_schema["properties"]["model"]["default"] = str(_SDXL_PATH)
+
+    # Patch execute — use SDXL from single file when model is a .safetensors path
+    _orig_exec = LocalDiffusion.execute
+
+    def _patched_exec(self, inputs: dict) -> ToolResult:
+        model_id = inputs.get("model", str(_SDXL_PATH))
         prompt = inputs["prompt"]
         negative = inputs.get("negative_prompt", "")
-        width = inputs.get("width", 512)
-        height = inputs.get("height", 512)
+        width = inputs.get("width", 1024)
+        height = inputs.get("height", 1024)
         seed = inputs.get("seed")
-        steps = inputs.get("num_inference_steps", 30)
-        guidance = inputs.get("guidance_scale", 7.5)
+        steps = inputs.get("num_inference_steps", 8)
+        guidance = inputs.get("guidance_scale", 5.0)
 
         if model_id.endswith(".safetensors"):
-            # SDXL from single .safetensors file
+            import time
             import torch
             from diffusers import StableDiffusionXLPipeline, DPMSolverMultistepScheduler
 
-            model_path = Path(model_id)
+            model_path = _Path(model_id)
             if not model_path.exists():
                 return ToolResult(
                     success=False,
                     error=f"Model file not found: {model_id}",
                 )
-
             try:
                 start = time.time()
                 pipe = StableDiffusionXLPipeline.from_single_file(
@@ -272,7 +298,7 @@ try:
                     generator=generator,
                 ).images[0]
 
-                output_path = Path(inputs.get("output_path", "generated_image.png"))
+                output_path = _Path(inputs.get("output_path", "generated_image.png"))
                 output_path.parent.mkdir(parents=True, exist_ok=True)
                 image.save(str(output_path))
 
@@ -294,9 +320,9 @@ try:
                 return ToolResult(success=False, error=f"SDXL local generation failed: {e}")
 
         # Fall through to original for hub models
-        return _orig_local_execute(self, inputs)
+        return _orig_exec(self, inputs)
 
-    LocalDiffusion.execute = _patched_local_execute
-    print("[OM Patch] LocalDiffusion patched to support SDXL .safetensors files.")
+    LocalDiffusion.execute = _patched_exec
+    print("[OM Patch] LocalDiffusion patched — auto-uses local SDXL .safetensors model.")
 except Exception as e:
     print(f"[OM Patch] Failed to patch LocalDiffusion: {e}")
