@@ -1,16 +1,21 @@
 #!/usr/bin/env python3
 """montage-is-open — OpenMontage Pipeline Orchestrator.
 
-Setup & maintenance:
-  uv run init                   # First-time setup (setup + update + preflight)
-Pipeline workflow:
-  uv run list                    # List projects, pipelines, stages
-  uv run init <name> [topic]     # Init a new project
-  uv run status [project]        # Show pipeline progress
-  uv run main <name>              # Run all remaining stages
-  uv run stage <project> <s>     # Execute one stage
-  uv run main                    # Show setup guide
+Usage (human entry point):
+  uv run m                       # Setup + guide (original behavior)
+  uv run m help                  # This message
 
+Setup & maintenance:
+  uv run m setup                 # Install deps, create venv
+  uv run m update                # Update OpenMontage submodule
+  uv run m preflight             # Run capability preflight
+
+Pipeline workflow:
+  uv run m list-pipelines        # List available pipelines
+  uv run m init <name> [topic]   # Init a new project
+  uv run m status [project]      # Show pipeline progress
+  uv run m run <project>         # Execute pipeline (resume-aware)
+  uv run m stage <project> <s>   # Execute one stage
 
 Stages (executed in order): research → proposal → script → scene_plan
 → assets → edit → compose → publish
@@ -106,20 +111,6 @@ def _assets_path(proj: Path) -> Path:
 def _renders_path(proj: Path) -> Path:
     return proj / "renders"
 
-def _get_pipeline_type(proj_dir):
-    """Read pipeline_type from any existing checkpoint."""
-    cp_dir = proj_dir / proj_dir.name
-    if cp_dir.is_dir():
-        for f in sorted(cp_dir.glob("checkpoint_*.json")):
-            try:
-                data = json.loads(f.read_text())
-                pt = data.get("pipeline_type")
-                if pt:
-                    return pt
-            except Exception:
-                continue
-    return None
-
 
 STAGE_ORDER = [
     "research", "proposal", "script", "scene_plan",
@@ -146,17 +137,6 @@ STAGE_ARTIFACTS = {
     "edit": "edit_decisions.json",
     "compose": "render_report.json",
     "publish": "publish_log.json",
-}
-
-STAGE_MODE = {
-    "research":     "human",
-    "proposal":     "human",
-    "script":       "human",
-    "scene_plan":   "mixed",
-    "assets":       "ai",
-    "edit":         "ai",
-    "compose":      "ai",
-    "publish":      "ai",
 }
 
 
@@ -218,80 +198,64 @@ def cmd_preflight():
         print(r.stderr.strip() or r.stdout.strip())
 
 
+def cmd_guide():
+    """Print the agent guide for AI-assisted video production."""
+    guide = textwrap.dedent("""\
+    ─── HOW TO MAKE A VIDEO WITH OPENMONTAGE ───
+
+    Open THIS directory in your AI coding assistant and tell it what you want:
+
+      "Make a 45-second animated explainer about why the sky is blue"
+      "Create a cinematic 30-second trailer for a sci-fi concept"
+      "Turn this YouTube link into a video like it, but about my topic"
+
+    The agent reads OpenMontage/AGENT_GUIDE.md and drives the full pipeline:
+    research → script → scene_plan → assets → edit → compose.
+
+    Output goes to projects/ (gitignored). Docs:
+      OpenMontage/AGENT_GUIDE.md  — full operating guide
+      OpenMontage/README.md       — overview + prompt gallery
+      uv run m               — re-run setup/update
+
+    Pipeline CLI (automated stages):
+      uv run m list-pipelines
+      uv run m init <project-name> [topic]
+      uv run m run <project-name>
+    """)
+    print(guide)
 
 
 # ---------------------------------------------------------------------------
 # Pipeline commands
 # ---------------------------------------------------------------------------
-def cmd_list():
-    """List projects, available pipelines, and all stages."""
+def cmd_list_pipelines():
+    """List available pipeline manifests."""
     _ensure_om_imports()
-    from lib.checkpoint import get_completed_stages
     from lib.pipeline_loader import list_pipelines
-
-    # Section 1: Projects
-    print(f"\n  {'─' * 50}")
-    print("  PROJECTS")
-    print(f"  {'─' * 50}\n")
-
-    if not PROJECTS_DIR.exists():
-        print("  No projects directory yet.\n")
-    else:
-        dirs = sorted(d.name for d in PROJECTS_DIR.iterdir()
-                      if d.is_dir() and not d.name.startswith("."))
-        if not dirs:
-            print("  No projects yet.  Create one:  uv run init <name>\n")
-        else:
-            for name in dirs:
-                proj_dir = _project_path(name)
-                pt = _get_pipeline_type(proj_dir)
-                cp_dir = proj_dir / proj_dir.name
-                if pt is None and not (cp_dir.is_dir() and any(cp_dir.glob("checkpoint_*.json"))):
-                    completed = []
-                else:
-                    try:
-                        completed_raw = get_completed_stages(proj_dir, name, pt)
-                        completed = [s for s in STAGE_ORDER if s in completed_raw]
-                    except Exception:
-                        completed = []
-
-                count = len(completed)
-                if count >= len(STAGE_ORDER):
-                    continue
-                if count == 0:
-                    status = "not started"
-                else:
-                    curr = STAGE_LABELS.get(completed[-1], completed[-1])
-                    nxt = STAGE_LABELS.get(STAGE_ORDER[count], STAGE_ORDER[count])
-                    status = f"{curr} done  (next: {nxt})"
-
-                print(f"    {name:24s}  {count}/{len(STAGE_ORDER)}  {status}")
-
-    # Section 2: Pipelines
-    print(f"\n  {'─' * 50}")
-    print("  PIPELINES")
-    print(f"  {'─' * 50}\n")
-    try:
-        names = list_pipelines()
-        if names:
-            for n in sorted(names):
-                print(f"    • {n}")
-        else:
-            print("  (none found)")
-    except Exception:
-        print("  (unavailable — OpenMontage not initialized)")
+    names = list_pipelines()
+    print(f"\n  Available pipelines ({len(names)}):\n")
+    for n in sorted(names):
+        print(f"    - {n}")
     print()
 
-    # Section 3: Stages
-    print(f"  {'─' * 50}")
-    print("  STAGES")
-    print(f"  {'─' * 50}\n")
-    for i, s in enumerate(STAGE_ORDER, 1):
-        label = STAGE_LABELS.get(s, s)
-        artifact = STAGE_ARTIFACTS.get(s, "")
-        mode = STAGE_MODE.get(s, "")
-        mode_tag = f"[{mode}]" if mode else ""
-        print(f"    {i}. {label:12s}  {artifact:24s}  {mode_tag}")
+def cmd_list_projects():
+    """List existing projects in projects/."""
+    if not PROJECTS_DIR.exists():
+        print("  No projects directory found.")
+        return
+    dirs = sorted(d.name for d in PROJECTS_DIR.iterdir()
+                  if d.is_dir() and not d.name.startswith("."))
+    if not dirs:
+        print("  No projects yet. Create one: uv run m init <name>")
+        return
+    print(f"\n  Existing projects ({len(dirs)}):\n")
+    for name in dirs:
+        cp_dir = _project_path(name) / name
+        ckpts = list(cp_dir.glob("checkpoint_*.json")) if cp_dir.exists() else []
+        stages_done = len(ckpts)
+        print(f"    {name}{'  (' + str(stages_done) + '/8 stages)' if ckpts else ''}")
+    print()
+    print("  Run: uv run m status <name>  to see details")
     print()
 
 
@@ -303,7 +267,9 @@ def cmd_init(args):
     proj_dir = _project_path(project_name)
     if proj_dir.exists():
         print(f"  Project '{project_name}' already exists at {proj_dir}")
-        return
+        if not args.force:
+            return
+        print("  (--force: overwriting checkpoints only)")
 
     # Create directory structure
     for d in [proj_dir, _artifact_path(proj_dir), _assets_path(proj_dir),
@@ -319,8 +285,8 @@ def cmd_init(args):
     print(f"  Pipeline: animated-explainer (default)\n")
     print(f"  Topic: {topic or '(not specified)'}\n")
     print(f"  Next steps — provide creative artifacts, then run:\n")
-    print(f"    uv run status {project_name}")
-    print(f"    uv run main {project_name}")
+    print(f"    uv run m status {project_name}")
+    print(f"    uv run m run {project_name}")
     print()
 
     # Create a topic hint file so stages can reference it
@@ -328,8 +294,6 @@ def cmd_init(args):
         info = {"project": project_name, "topic": topic, "pipeline": "animated-explainer"}
         with open(proj_dir / "project.json", "w") as f:
             json.dump(info, f, indent=2)
-
-
 
 
 def cmd_status(args):
@@ -347,8 +311,7 @@ def cmd_status(args):
         print(f"  Project '{project_name}' not found")
         return
 
-    pt = _get_pipeline_type(proj_dir)
-    completed_raw = get_completed_stages(proj_dir, project_name, pt)
+    completed_raw = get_completed_stages(proj_dir, project_name)
     # Filter to only stages we track
     completed = [s for s in STAGE_ORDER if s in completed_raw]
 
@@ -375,7 +338,7 @@ def cmd_status(args):
         print("\n  🎉 Pipeline complete!")
     else:
         print(f"\n  Next stage: {STAGE_LABELS.get(next_stage, next_stage)}")
-        print(f"  Run: uv run stage {project_name} {next_stage}")
+        print(f"  Run: uv run m stage {project_name} {next_stage}")
     print()
 
 
@@ -613,21 +576,37 @@ def stage_assets(proj_dir):
     music_dir.mkdir(parents=True, exist_ok=True)
 
     sections = script.get("sections", [])
-    section_wavs = []
+    audio_files = []
 
     # --- Narration (TTS) ---
     print("  Generating narration (TTS)...")
 
-    # Use local Piper TTS (Fish Speech requires API key — skip it)
+    # Try FishSpeechTTS first, fall back to PiperTTS
     tts = None
-    try:
-        from tools.audio.piper_tts import PiperTTS as _PiperTTS
-        tts = _PiperTTS()
-        print("    Using Piper TTS")
-    except Exception as e:
-        print(f"    ⚠ No local TTS available: {e}")
-        print("    Install piper-tts: pip install piper-tts")
+    is_fish = False
 
+    try:
+        from custom_tools.fish_speech_tts import FishSpeechTTS
+        fish = FishSpeechTTS()
+        fish_status = fish.get_status()
+        from tools.base_tool import ToolStatus
+        if fish_status == ToolStatus.AVAILABLE:
+            tts = fish
+            is_fish = True
+            print("    Using Fish Speech TTS")
+    except Exception:
+        pass
+
+    if tts is None:
+        try:
+            from tools.audio.piper_tts import PiperTTS as _PiperTTS
+            tts = _PiperTTS()
+            print("    Using Piper TTS")
+        except Exception as e:
+            print(f"    ⚠ No local TTS available: {e}")
+            print("    Set FISH_API_KEY in .env for cloud TTS, or install piper-tts")
+
+    # Generate TTS per section
     if tts:
         for sec in sections:
             sec_id = sec.get("id", "unknown")
@@ -637,36 +616,20 @@ def stage_assets(proj_dir):
 
             output_wav = audio_dir / f"narration_{sec_id}.wav"
             try:
-                result = tts.execute({"text": text, "output_path": str(output_wav)})
+                tts_args = {
+                    "text": text,
+                    "output_path": str(output_wav),
+                }
+                if is_fish:
+                    tts_args["voice"] = "default"
+                result = tts.execute(tts_args)
                 if result.success:
-                    section_wavs.append(str(output_wav))
+                    audio_files.append(str(output_wav))
                     print(f"    ✅ {sec_id}: generated ({len(text)} chars)")
                 else:
                     print(f"    ⚠ {sec_id}: TTS failed — {result.error}")
             except Exception as e:
                 print(f"    ⚠ {sec_id}: TTS error — {e}")
-
-    # Concatenate section WAVs into single narration.wav
-    narration_wav = audio_dir / "narration.wav"
-    narration_ready = False
-    if section_wavs:
-        try:
-            import subprocess
-            concat_txt = audio_dir / ".concat_list.txt"
-            with open(concat_txt, "w") as f:
-                for w in section_wavs:
-                    f.write(f"file '{w}'\n")
-            subprocess.run(
-                ["ffmpeg", "-y", "-f", "concat", "-safe", "0",
-                 "-i", str(concat_txt), "-c", "copy", str(narration_wav)],
-                capture_output=True, text=True, timeout=120
-            )
-            if narration_wav.exists():
-                narration_ready = True
-                print(f"    ✅ Concatenated narration: {narration_wav}")
-            concat_txt.unlink(missing_ok=True)
-        except Exception as e:
-            print(f"    ⚠ Narration concatenation failed: {e}")
 
     # --- Background Music ---
     print("\n  Downloading background music...")
@@ -689,6 +652,7 @@ def stage_assets(proj_dir):
     except Exception as e:
         print(f"    ⚠ Music generation unavailable: {e}")
 
+    # If no music from Pixabay, try music_gen
     if not music_success:
         try:
             from tools.audio.music_gen import MusicGen
@@ -704,56 +668,35 @@ def stage_assets(proj_dir):
         except Exception:
             pass
 
+    print(f"\n  Audio files: {len(audio_files)}")
+    print(f"  Background music: {'yes' if music_success else 'no'}")
 
-    # --- Image Assets (from assets/images/) ---
-    print("\n  Registering image assets...")
-    img_dir = _assets_path(proj_dir) / "images"
-    image_assets = []
-    if img_dir.exists():
-        for img_path in sorted(img_dir.iterdir()):
-            if img_path.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp"):
-                # Derive scene_id from filename: scene-1-hook.jpg → scene-1-hook
-                scene_id = img_path.stem
-                asset_id = f"img_{scene_id}"
-                image_assets.append({
-                    "id": asset_id,
-                    "type": "image",
-                    "path": str(img_path.relative_to(HERE)),
-                    "source_tool": "placeholder",
-                    "scene_id": scene_id,
-                    "generation_summary": f"Placeholder image for {scene_id}",
-                })
-                print(f"    ✅ Image: {img_path.name} -> {asset_id}")
-    print(f"  Image assets: {len(image_assets)}")
-
-    # --- Build Asset Manifest ---
+    # Build asset manifest
     assets = []
-    if narration_ready:
+    for af in audio_files:
+        p = Path(af)
         assets.append({
-            "id": "a_narration",
-            "type": "narration",
-            "path": str(narration_wav.relative_to(HERE)),
-            "source_tool": "piper_tts",
-            "scene_id": "global",
-            "generation_summary": "Generated Piper voice narration",
+            "id": p.stem,
+            "type": "audio",
+            "subtype": "narration",
+            "path": str(p.relative_to(proj_dir)),
+            "format": "wav",
         })
-    assets.extend(image_assets)
     if music_success:
         assets.append({
-            "id": "a_music",
-            "type": "music",
-            "path": str(music_path.relative_to(HERE)),
-            "source_tool": "pixabay_music",
-            "scene_id": "global",
-            "generation_summary": "Downloaded background music",
+            "id": "background_music",
+            "type": "audio",
+            "subtype": "music",
+            "path": str(music_path.relative_to(proj_dir)),
+            "format": "mp3",
         })
 
     asset_manifest = {
         "version": "1.0",
+        "project": project_id,
         "assets": assets,
+        "metadata": {"generated_by": "run.py assets stage"},
     }
-
-    print(f"\n  Manifest: {len(assets)} assets ({len(image_assets)} images, {'1 narration' if narration_ready else '0 narration'}, {'1 music' if music_success else '0 music'})")
 
     art_dir = _artifact_path(proj_dir)
     with open(art_dir / "asset_manifest.json", "w") as f:
@@ -782,105 +725,60 @@ def stage_edit(proj_dir):
         return False
 
     scenes = scene_plan.get("scenes", [])
-    assets_list = asset_manifest.get("assets", [])
+    assets = asset_manifest.get("assets", [])
 
-    # Build asset lookup by id
-    asset_by_id = {a["id"]: a for a in assets_list if "id" in a}
+    # Map audio assets by section id
+    audio_map = {}
+    for a in assets:
+        if a.get("subtype") == "narration":
+            # Extract section id from filename: narration_s1.wav → s1
+            stem = Path(a["path"]).stem
+            parts = stem.split("_", 1)
+            if len(parts) > 1:
+                audio_map[parts[1]] = a["path"]
 
-    # Find narration, music, and image assets
-    narration_asset = next((a for a in assets_list if a.get("type") == "narration"), None)
-    music_asset = next((a for a in assets_list if a.get("type") == "music"), None)
-    image_assets = [a for a in assets_list if a.get("type") == "image"]
-
-    cuts = []
+    timeline = []
     current_time = 0.0
 
     for i, scene in enumerate(scenes):
-        scene_id = scene.get("id", f"cut-{i+1}")
         sec_id = scene.get("script_section_id", f"s{i+1}")
-        dur = scene.get("end_seconds", 5.0) - scene.get("start_seconds", 0.0)
-        if dur <= 0:
-            dur = 5.0
+        dur = scene.get("duration_seconds", 5.0)
 
-        # Find matching image asset by scene_id
-        img_asset = None
-        for ia in image_assets:
-            if scene_id in ia.get("id", "") or scene_id in ia.get("scene_id", ""):
-                img_asset = ia
-                break
+        entry = {
+            "scene_id": scene.get("id", f"scene-{sec_id}"),
+            "start_time": round(current_time, 2),
+            "end_time": round(current_time + dur, 2),
+            "duration_seconds": dur,
+            "type": scene.get("type", "explainer"),
+            "narration_asset": audio_map.get(sec_id),
+            "visuals": [],
+        }
 
-        out_seconds = round(current_time + dur, 2)
+        if scene.get("required_assets"):
+            for ra in scene["required_assets"]:
+                if ra.get("type") == "image":
+                    entry["visuals"].append({
+                        "type": "image",
+                        "description": ra.get("description", ""),
+                        "duration_seconds": dur,
+                    })
 
-        # Determine cut type based on scene position
-        if i == 0:
-            # First scene: hero title card
-            overlay_notes = scene.get("overlay_notes", "")
-            cut = {
-                "id": f"cut_{scene_id}",
-                "type": "hero_title",
-                "source": "",
-                "in_seconds": round(current_time, 2),
-                "out_seconds": out_seconds,
-                "text": sec_id.replace("-", " ").title(),
-                "heroSubtitle": overlay_notes[:200] if overlay_notes else scene.get("description", "")[:200],
-                "backgroundVideo": None,
-                "backgroundOverlay": 0.4,
-            }
-            if img_asset:
-                cut["backgroundImage"] = img_asset["path"]
-        elif i == len(scenes) - 1:
-            # Last scene: callout recap
-            cut = {
-                "id": f"cut_{scene_id}",
-                "type": "callout",
-                "source": "",
-                "in_seconds": round(current_time, 2),
-                "out_seconds": out_seconds,
-                "text": scene.get("overlay_notes", scene.get("description", ""))[:300],
-                "title": sec_id.replace("-", " ").title(),
-                "callout_type": "info",
-                "backgroundOverlay": 0.5,
-            }
-            if img_asset:
-                cut["backgroundImage"] = img_asset["path"]
-        else:
-            # Middle scenes: image with ken-burns animation
-            cut = {
-                "id": f"cut_{scene_id}",
-                "type": "Img",
-                "in_seconds": round(current_time, 2),
-                "out_seconds": out_seconds,
-                "animation": "ken-burns",
-            }
-            if img_asset:
-                cut["source"] = img_asset["id"]
-            else:
-                cut["source"] = ""
-
-        cuts.append(cut)
+        timeline.append(entry)
         current_time += dur
-
-    # Audio config: use narration.src (single mixed file) + music
-    audio_config = {}
-    if narration_asset:
-        audio_config["narration"] = {
-            "src": narration_asset["path"],
-            "volume": 1.0,
-            "segments": [],
-        }
-    if music_asset:
-        audio_config["music"] = {
-            "asset_id": music_asset["id"],
-            "volume": 0.3,
-            "ducking": {"enabled": True, "reduction_db": 6.0},
-        }
 
     edit_decisions = {
         "version": "1.0",
-        "cuts": cuts,
-        "audio": audio_config,
+        "project": project_id,
+        "total_duration_seconds": round(current_time, 2),
+        "timeline": timeline,
+        "audio_mix": {
+            "narration_volume": 0.8,
+            "music_volume": 0.3,
+            "music_ducking": True,
+            "ducking_reduce_by_db": 6.0,
+        },
+        "subtitles": {"enabled": True, "style": "clean"},
         "render_runtime": "remotion",
-        "renderer_family": "explainer-data",
         "metadata": {"generated_by": "run.py edit stage"},
     }
 
@@ -888,8 +786,8 @@ def stage_edit(proj_dir):
     with open(art_dir / "edit_decisions.json", "w") as f:
         json.dump(edit_decisions, f, indent=2)
 
-    print(f"  Cuts in timeline: {len(cuts)}")
-    print(f"  Total duration: {round(current_time, 2)}s")
+    print(f"  Scenes in timeline: {len(timeline)}")
+    print(f"  Total duration: {edit_decisions['total_duration_seconds']}s")
 
     _write_checkpoint(proj_dir, project_id, "edit", "completed",
                        {"edit_decisions": edit_decisions})
@@ -917,13 +815,6 @@ def stage_compose(proj_dir):
     renders_dir = _renders_path(proj_dir)
     renders_dir.mkdir(parents=True, exist_ok=True)
 
-    cuts = edit_decisions.get("cuts", [])
-    audio_config = edit_decisions.get("audio", {})
-    music_config = audio_config.get("music", {}) if isinstance(audio_config, dict) else {}
-    narration_config = audio_config.get("narration", {}) if isinstance(audio_config, dict) else {}
-
-    total_duration = cuts[-1]["out_seconds"] if cuts else 0
-
     # --- Audio Mix ---
     print("  Mixing audio...")
     try:
@@ -931,70 +822,36 @@ def stage_compose(proj_dir):
         mixer = AudioMixer()
         final_mix = audio_dir / "final_mix.wav"
 
-        mix_tracks = []
-
-        # Support both narration.src (single file) and narration.segments (per-section)
-        narration_src = narration_config.get("src") if isinstance(narration_config, dict) else None
-        if narration_src:
-            # Single mixed narration file
-            abs_path = str((HERE / narration_src).resolve())
-            if os.path.exists(abs_path):
-                mix_tracks.append({
-                    "path": abs_path,
-                    "role": "speech",
-                    "volume": narration_config.get("volume", 1.0),
-                    "start_seconds": 0,
-                })
-        else:
-            for seg in narration_config.get("segments", []):
-                asset_id = seg.get("asset_id")
-                if not asset_id:
-                    continue
-                for a in asset_manifest.get("assets", []):
-                    if a.get("id") == asset_id:
-                        abs_path = str((HERE / a["path"]).resolve())
-                        if os.path.exists(abs_path):
-                            mix_tracks.append({
-                                "path": abs_path,
-                                "role": "speech",
-                                "volume": 0.8,
-                                "start_seconds": seg.get("start_seconds", 0),
-                            })
-                        break
-
-        music_asset_id = music_config.get("asset_id") if isinstance(music_config, dict) else None
-        if music_asset_id:
-            for a in asset_manifest.get("assets", []):
-                if a.get("id") == music_asset_id:
-                    music_path = str((HERE / a["path"]).resolve())
-                    if os.path.exists(music_path):
-                        mix_tracks.append({
-                            "path": music_path,
-                            "role": "music",
-                            "volume": music_config.get("volume", 0.3),
-                        })
-                    break
-
         mix_config = {
-            "operation": "full_mix",
             "output_path": str(final_mix),
-            "tracks": mix_tracks,
+            "narration_tracks": [],
+            "music_track": None,
+            "ducking": edit_decisions.get("audio_mix", {}).get("music_ducking", True),
         }
-        ducking = music_config.get("ducking", {}) if isinstance(music_config.get("ducking"), dict) else {"enabled": bool(music_config.get("ducking", True))}
-        if any(t["role"] == "speech" for t in mix_tracks):
-            mix_config["ducking"] = ducking
+
+        for entry in edit_decisions.get("timeline", []):
+            nar = entry.get("narration_asset")
+            if nar:
+                abs_path = str((proj_dir / nar).resolve())
+                if os.path.exists(abs_path):
+                    mix_config["narration_tracks"].append({
+                        "path": abs_path,
+                        "start_time": entry["start_time"],
+                        "volume": edit_decisions.get("audio_mix", {}).get("narration_volume", 0.8),
+                    })
+
+        for a in asset_manifest.get("assets", []):
+            if a.get("subtype") == "music":
+                music_path = str((proj_dir / a["path"]).resolve())
+                if os.path.exists(music_path):
+                    mix_config["music_track"] = {
+                        "path": music_path,
+                        "volume": edit_decisions.get("audio_mix", {}).get("music_volume", 0.3),
+                    }
 
         mix_result = mixer.execute(mix_config)
         if mix_result.success:
             print(f"    ✅ Audio mixed: {final_mix}")
-            # Update edit_decisions to point to final_mix for rendering
-            if "audio" not in edit_decisions or not isinstance(edit_decisions.get("audio"), dict):
-                edit_decisions["audio"] = {}
-            edit_decisions["audio"]["narration"] = {
-                "src": str(final_mix.relative_to(HERE)),
-                "volume": 1.0,
-                "segments": [],
-            }
         else:
             print(f"    ⚠ Audio mixing issue: {mix_result.error}")
     except Exception as e:
@@ -1009,12 +866,13 @@ def stage_compose(proj_dir):
         composer = VideoCompose()
 
         compose_inputs = {
-            "operation": "render",
             "edit_decisions": edit_decisions,
             "asset_manifest": asset_manifest,
+            "project_dir": str(proj_dir),
             "output_path": str(output_path),
         }
 
+        # Check render_runtime from edit_decisions
         runtime = edit_decisions.get("render_runtime", "remotion")
         print(f"    Using runtime: {runtime}")
 
@@ -1034,17 +892,12 @@ def stage_compose(proj_dir):
     file_size = output_path.stat().st_size if output_path.exists() else 0
     render_report = {
         "version": "1.0",
-        "outputs": [
-            {
-                "path": str(output_path),
-                "format": "mp4",
-                "codec": "h264",
-                "resolution": "1920x1080",
-                "fps": 30.0,
-                "duration_seconds": round(total_duration, 2),
-                "file_size_bytes": file_size,
-            }
-        ],
+        "project": project_id,
+        "output_path": str(output_path),
+        "duration_seconds": edit_decisions.get("total_duration_seconds", 0),
+        "file_size_bytes": file_size,
+        "render_runtime": runtime,
+        "status": "completed",
         "metadata": {"generated_by": "run.py compose stage"},
     }
 
@@ -1108,14 +961,13 @@ def stage_publish(proj_dir):
 
     # Create export package
     export_dir = proj_dir / "export"
-    from datetime import datetime, timezone
     publish_log = {
         "version": "1.0",
         "entries": [
             {
                 "platform": "export",
                 "status": "exported",
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "timestamp": "",
                 "export_path": str(export_dir),
             }
         ],
@@ -1149,6 +1001,7 @@ def _find_latest_project():
     if not PROJECTS_DIR.exists():
         return None
     projects = sorted(PROJECTS_DIR.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)
+    projects = [p for p in projects if p.is_dir() and not p.name.startswith(".")]
     return projects[0].name if projects else None
 
 
@@ -1161,7 +1014,7 @@ def cmd_stage(args):
     proj_dir = _project_path(project_name)
     if not proj_dir.exists():
         print(f"  Project '{project_name}' not found at {proj_dir}")
-        print(f"  Run: uv run init {project_name}")
+        print(f"  Run: uv run m init {project_name}")
         return False
 
     if stage_name not in STAGE_FUNCS:
@@ -1183,14 +1036,14 @@ def cmd_run(args):
     proj_dir = _project_path(project_name)
     if not proj_dir.exists():
         print(f"  Project '{project_name}' not found at {proj_dir}")
-        print(f"  Run: uv run init {project_name}")
+        print(f"  Run: uv run m init {project_name}")
         return
 
     print(f"\n  Pipeline run for: {project_name}\n")
 
-    pt = _get_pipeline_type(proj_dir)
-    completed_raw = get_completed_stages(proj_dir, project_name, pt)
+    completed_raw = get_completed_stages(proj_dir, project_name)
     completed = [s for s in STAGE_ORDER if s in completed_raw]
+
     # Find first incomplete stage in our order
     next_stage = None
     for s in STAGE_ORDER:
@@ -1234,76 +1087,6 @@ def cmd_run(args):
     print()
 
 
-def cmd_gen_images(args):
-    """Generate scene images from scene_plan using local SDXL model."""
-    _ensure_om_imports()
-    project_name = args.project
-    proj_dir = _project_path(project_name)
-    if not proj_dir.exists():
-        print(f"  Project '{project_name}' not found at {proj_dir}")
-        return
-
-    scene_plan = _read_artifact(proj_dir, "scene_plan.json")
-    if not scene_plan:
-        print("  ⚠ No scene_plan.json found. Complete the Scene Plan stage first.\n")
-        return
-
-    sdxl_model = os.environ.get("SDXL_MODEL_PATH",
-                                 os.path.expanduser("~/Downloads/DreamShaperXL_Lightning.safetensors"))
-    model_path = Path(sdxl_model)
-    if not model_path.exists():
-        print(f"  ⚠ SDXL model not found: {sdxl_model}")
-        print("  Set SDXL_MODEL_PATH env var or place model at default path.\n")
-        return
-
-    from tools.base_tool import ToolStatus
-    from tools.graphics.local_diffusion import LocalDiffusion
-
-    img_dir = _assets_path(proj_dir) / "images"
-    img_dir.mkdir(parents=True, exist_ok=True)
-
-    tool = LocalDiffusion()
-    if tool.get_status() != ToolStatus.AVAILABLE:
-        print("  ⚠ LocalDiffusion tool unavailable (diffusers not installed?)\n")
-        return
-
-    scenes = scene_plan.get("scenes", [])
-    generated = 0
-    skipped = 0
-    for sc in scenes:
-        sc_id = sc.get("id", f"scene-{generated + skipped + 1}")
-        out_path = img_dir / f"{sc_id}.jpg"
-        if out_path.exists():
-            print(f"  ∎ {sc_id}: already exists, skipping")
-            skipped += 1
-            continue
-
-        desc = sc.get("description", "")
-        overlay = sc.get("overlay_notes", "")
-        prompt = desc
-        if overlay:
-            prompt += f" — {overlay}"
-        prompt += ", cinematic lighting, professional, high quality, 4k"
-
-        print(f"  Generating: {sc_id}...")
-        result = tool.execute({
-            "prompt": prompt,
-            "negative_prompt": "text, watermark, signature, low quality, blurry",
-            "model": str(model_path),
-            "output_path": str(out_path),
-            "width": 1024,
-            "height": 1024,
-            "num_inference_steps": 8,
-            "guidance_scale": 5.0,
-        })
-        if result.success:
-            generated += 1
-            print(f"  ✅ {sc_id}: saved")
-        else:
-            print(f"  ⚠ {sc_id}: failed — {result.error}")
-
-    print(f"\n  Done — {generated} generated, {skipped} skipped\n")
-
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -1321,14 +1104,36 @@ def main():
             Creative stages (1-3): provide artifact JSONs in artifacts/.
             Automated stages (4-8): run via OpenMontage tools.
             """),
-        add_help=False,
     )
-    parser.add_argument("name", nargs="?", default=None, help="Project name")
-    args = parser.parse_args()
+    parser.add_argument("--version", action="version", version="montage-is-open 0.2")
 
-    if args.name is not None:
-        cmd_run(argparse.Namespace(project=args.name))
-        return
+    sub = parser.add_subparsers(dest="command", help="Sub-command")
+
+    # Legacy commands
+    sub.add_parser("setup", help="Install deps, create venv")
+    sub.add_parser("update", help="Update OpenMontage submodule")
+    sub.add_parser("preflight", help="Run capability preflight")
+    sub.add_parser("guide", help="Show the AI agent guide")
+
+    # Pipeline commands
+
+    sub.add_parser("list", help="List existing projects")
+    sub.add_parser("list-pipelines", help="List available pipeline manifests")
+
+    p_init = sub.add_parser("init", help="Initialize a new project")
+    p_init.add_argument("name", help="Project name (directory under projects/)")
+    p_init.add_argument("topic", nargs="?", default=None, help="Video topic")
+    p_init.add_argument("--force", action="store_true", help="Overwrite existing checkpoints")
+
+    p_status = sub.add_parser("status", help="Show pipeline progress")
+    p_status.add_argument("name", nargs="?", default=None, help="Project name (default: latest)")
+
+    p_run = sub.add_parser("run", help="Execute pipeline (resume-aware)")
+    p_run.add_argument("project", help="Project name")
+
+    p_stage = sub.add_parser("stage", help="Execute a single stage")
+    p_stage.add_argument("project", help="Project name")
+    p_stage.add_argument("stage", choices=STAGE_ORDER, help="Stage to execute")
 
     # Show pinned submodule version
     pinned = ""
@@ -1343,7 +1148,30 @@ def main():
         pass
     print(f"\n  OpenMontage: submodule at {OM.resolve()}{pinned}\n")
 
-    _default_guide()
+    args = parser.parse_args()
+
+    if args.command is None:
+        # Default: full setup + guide (original behavior)
+        _default_guide()
+        return
+
+    # Dispatch
+    dispatch = {
+        "setup": lambda: _chain_or_standalone(cmd_setup),
+        "update": cmd_update,
+        "preflight": cmd_preflight,
+        "guide": cmd_guide,
+        "list": cmd_list_projects,
+        "list-pipelines": cmd_list_pipelines,
+        "init": lambda: cmd_init(args),
+        "status": lambda: cmd_status(args),
+        "run": lambda: cmd_run(args),
+        "stage": lambda: cmd_stage(args),
+    }
+
+    handler = dispatch.get(args.command)
+    if handler:
+        handler()
 
 
 def _default_guide():
@@ -1361,20 +1189,15 @@ def _default_guide():
     print()
     print("  ── WORKFLOW ──")
     print()
-    print("  0. First-time setup (run once)")
-    print()
-    print("       uv run init")
-    print()
-    print("     This runs setup, update, and preflight for you.")
-    print()
     print("  1. Create a project")
     print()
-    print("       uv run init my-video")
+    print("       uv run m init my-video")
     print()
     print("     Creates  projects/my-video/  with subdirectories:")
     print("       artifacts/    — your hand-crafted JSON files (stages 1-3)")
     print("       assets/      — generated images, audio, video")
     print("       renders/     — final video output")
+    print()
     print("  2. Provide creative artifacts (stages 1-3 — manual)")
     print()
     print("     You create JSON files in  projects/my-video/artifacts/")
@@ -1449,23 +1272,29 @@ def _default_guide():
           '             "enhancement_cues": [\n'
           '               {"type": "overlay", "description": "Text overlay: key stat"}\n'
           '             ]\n'
+          '           }\n'
           '         ]\n'
           '       }')
     print()
     print("  3. Run the pipeline (resumes where you left off)")
     print()
-    print("       uv run main my-video")
+    print("       uv run m run my-video")
     print()
     print("     Stages 4-8 auto-generate: scene plan, assets (TTS, images),")
     print("     edit decisions, video composition, and export.")
     print()
-    print("    uv run init                    First-time setup (setup + update + preflight)")
-    print("    uv run init <name>             Create a new project")
-    print("    uv run list                    List projects, pipelines, stages")
-    print("    uv run status <name>           Show stage progress")
-    print("    uv run main <name>              Run all remaining stages")
-    print("    uv run stage <name> <stage>    Execute one stage")
-    print("    uv run main                    Show setup guide")
+    print("  ── ALL COMMANDS ──")
+    print()
+    print("    uv run m setup                  Install deps, create venv")
+    print("    uv run m update                 Update OpenMontage submodule")
+    print("    uv run m preflight              Run capability preflight")
+    print("    uv run m guide                  Show the AI agent guide")
+    print("    uv run m init <name>            Create a new project")
+    print("    uv run m status <name>          See what's done and what's next")
+    print("    uv run m list                   List all projects")
+    print("    uv run m list-pipelines         List available pipeline manifests")
+    print("    uv run m run <name>             Run all remaining stages")
+    print("    uv run m stage <name> <stage>   Run one stage (e.g. script)")
     print()
     print("  ── OR LET AN AI AGENT DO IT ──")
     print()
@@ -1483,6 +1312,10 @@ def _default_guide():
     print()
 
 
+def _chain_or_standalone(fn):
+    """Run a single setup sub-command without chaining."""
+
+    fn()
 
 
 def check_submodule():

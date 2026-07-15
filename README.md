@@ -6,7 +6,7 @@ AI-powered video production powered by [OpenMontage](https://github.com/calesthi
 
 ```bash
 # First time — install everything
-uv run run.py
+uv run m
 
 # Then open this directory in your AI coding assistant and say:
 #   "Make a 45-second animated explainer about why the sky is blue"
@@ -25,7 +25,7 @@ The script auto-updates OpenMontage, installs dependencies, and shows available 
 
 ```bash
 # Re-run setup / update / check tools
-uv run run.py
+uv run m
 
 # Or manually:
 git submodule update --remote OpenMontage    # get latest
