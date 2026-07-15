@@ -96,14 +96,15 @@ def patched_remotion_render(self, inputs: dict) -> ToolResult:
     props = json.loads(json.dumps(composition_data))
 
     for cut in props.get("cuts", []):
-        source = cut.get("source", "")
-        if source and not source.startswith(("http://", "https://", "file://")):
-            if source.startswith("projects/"):
-                continue
-            resolved = Path(source).resolve()
-            if resolved.exists():
-                posix = resolved.as_posix()
-                cut["source"] = f"file:///{posix}" if not posix.startswith("/") else f"file://{posix}"
+        for field in ("source", "backgroundImage"):
+            value = cut.get(field, "")
+            if value and not value.startswith(("http://", "https://", "file://")):
+                if value.startswith("projects/"):
+                    continue
+                resolved = Path(value).resolve()
+                if resolved.exists():
+                    posix = resolved.as_posix()
+                    cut[field] = f"file:///{posix}" if not posix.startswith("/") else f"file://{posix}"
 
     if "themeConfig" not in props:
         playbook_name = (
@@ -214,3 +215,88 @@ try:
     print("[OM Patch] Custom FishSpeechTTS registered successfully in ToolRegistry.")
 except Exception as e:
     print(f"[OM Patch] Failed to register custom FishSpeechTTS: {e}")
+
+# 6. Patch LocalDiffusion to support SDXL from local .safetensors file
+try:
+    from tools.graphics.local_diffusion import LocalDiffusion
+
+    _orig_local_execute = LocalDiffusion.execute
+
+    def _patched_local_execute(self, inputs: dict) -> ToolResult:
+        import time
+        from pathlib import Path
+
+        model_id = inputs.get("model", "stabilityai/stable-diffusion-2-1-base")
+        prompt = inputs["prompt"]
+        negative = inputs.get("negative_prompt", "")
+        width = inputs.get("width", 512)
+        height = inputs.get("height", 512)
+        seed = inputs.get("seed")
+        steps = inputs.get("num_inference_steps", 30)
+        guidance = inputs.get("guidance_scale", 7.5)
+
+        if model_id.endswith(".safetensors"):
+            # SDXL from single .safetensors file
+            import torch
+            from diffusers import StableDiffusionXLPipeline, DPMSolverMultistepScheduler
+
+            model_path = Path(model_id)
+            if not model_path.exists():
+                return ToolResult(
+                    success=False,
+                    error=f"Model file not found: {model_id}",
+                )
+
+            try:
+                start = time.time()
+                pipe = StableDiffusionXLPipeline.from_single_file(
+                    str(model_path),
+                    torch_dtype=torch.float16,
+                    use_safetensors=True,
+                )
+                pipe.scheduler = DPMSolverMultistepScheduler.from_config(pipe.scheduler.config)
+                pipe.set_progress_bar_config(disable=True)
+                pipe.enable_model_cpu_offload()
+
+                generator = None
+                if seed is not None:
+                    generator = torch.Generator(device="cuda").manual_seed(seed)
+
+                image = pipe(
+                    prompt,
+                    negative_prompt=negative,
+                    width=width,
+                    height=height,
+                    num_inference_steps=steps,
+                    guidance_scale=guidance,
+                    generator=generator,
+                ).images[0]
+
+                output_path = Path(inputs.get("output_path", "generated_image.png"))
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                image.save(str(output_path))
+
+                return ToolResult(
+                    success=True,
+                    data={
+                        "provider": "local_diffusion",
+                        "model": model_id,
+                        "prompt": prompt,
+                        "output": str(output_path),
+                    },
+                    artifacts=[str(output_path)],
+                    cost_usd=0.0,
+                    duration_seconds=round(time.time() - start, 2),
+                    seed=seed,
+                    model=model_id,
+                )
+            except Exception as e:
+                return ToolResult(success=False, error=f"SDXL local generation failed: {e}")
+
+        # Fall through to original for hub models
+        return _orig_local_execute(self, inputs)
+
+    LocalDiffusion.execute = _patched_local_execute
+    print("[OM Patch] LocalDiffusion patched to support SDXL .safetensors files.")
+except Exception as e:
+    print(f"[OM Patch] Failed to patch LocalDiffusion: {e}")
