@@ -103,17 +103,6 @@ def _assets_path(proj: Path) -> Path:
     return proj / "assets"
 
 
-def _make_img_asset(root: Path, scene_id: str, path: Path) -> dict:
-    return {
-        "id": f"img_{scene_id}",
-        "type": "image",
-        "path": str(path.relative_to(root)),
-        "source_tool": "local_sdxl",
-        "scene_id": scene_id,
-        "generation_summary": f"SDXL generated image for {scene_id}",
-    }
-
-
 def _renders_path(proj: Path) -> Path:
     return proj / "renders"
 
@@ -715,14 +704,16 @@ def stage_assets(proj_dir):
         except Exception:
             pass
 
-    # --- Scene Assets: check what's expected, collect what's provided ---
+
+    # --- Scene Assets: check required assets ---
     print("\n  Checking scene asset requirements...")
     video_dir = _assets_path(proj_dir) / "videos"
     img_dir = _assets_path(proj_dir) / "images"
+    video_dir.mkdir(parents=True, exist_ok=True)
     img_dir.mkdir(parents=True, exist_ok=True)
     image_assets = []
     video_assets = []
-    missing_recordings = []
+    missing = []
 
     scenes = scene_plan.get("scenes", [])
     for sc in scenes:
@@ -731,8 +722,8 @@ def stage_assets(proj_dir):
             req_type = req.get("type", "")
             req_source = req.get("source", "")
 
-            if req_type in ("screen_recording", "video") or req_source in ("record", "source"):
-                # User is expected to provide a recording
+            if req_source == "record" or req_type == "screen_recording":
+                # User must provide a screen recording
                 recording_path = video_dir / f"{sc_id}.mp4"
                 if recording_path.exists():
                     video_assets.append({
@@ -743,82 +734,55 @@ def stage_assets(proj_dir):
                         "scene_id": sc_id,
                         "generation_summary": f"User-provided recording for {sc_id}",
                     })
-                    print(f"    ✅ {sc_id}: found recording")
+                    print(f"    ✅ {sc_id}: recording present")
                 else:
-                    missing_recordings.append(sc_id)
-                    print(f"    ⚠ {sc_id}: expects recording — none at {recording_path.name}")
+                    missing.append((sc_id, "screen recording", f"assets/videos/{sc_id}.mp4"))
+                    print(f"    ⚠ {sc_id}: expects screen recording — missing")
 
-    if missing_recordings:
-        print(f"\n  ⚠ {len(missing_recordings)} scene(s) expect screen recordings:")
-        for sc_id in missing_recordings:
-            print(f"       Place MP4 at:  {video_dir}/{sc_id}.mp4")
-        print(f"     Generating images as stand-in for now.")
-
-    # --- Generate images via SDXL for scenes without recordings ---
-    sdxl_model = os.environ.get("SDXL_MODEL_PATH",
-                                 os.path.expanduser("~/Downloads/DreamShaperXL_Lightning.safetensors"))
-    model_path = Path(sdxl_model)
-    have_sdxl = model_path.exists()
-
-    if have_sdxl and missing_recordings:
-        from tools.base_tool import ToolStatus
-        from tools.graphics.local_diffusion import LocalDiffusion
-        tool = LocalDiffusion()
-        if tool.get_status() == ToolStatus.AVAILABLE:
-            print("\n  Generating stand-in images (local SDXL)...")
-            for sc in scenes:
-                sc_id = sc.get("id", "")
-                if sc_id not in missing_recordings:
-                    continue  # only generate for missing recordings
-                out_path = img_dir / f"{sc_id}.jpg"
-                if out_path.exists():
-                    print(f"    ∎ {sc_id}: already exists")
-                    image_assets.append(_make_img_asset(HERE, sc_id, out_path))
-                    continue
-                desc = sc.get("description", "")
-                overlay = sc.get("overlay_notes", "")
-                prompt = desc + (f" — {overlay}" if overlay else "")
-                prompt += ", cinematic lighting, professional, high quality, 4k"
-                print(f"    Generating: {sc_id}...")
-                result = tool.execute({
-                    "prompt": prompt,
-                    "negative_prompt": "text, watermark, signature, low quality, blurry",
-                    "output_path": str(out_path),
-                    "width": 1024, "height": 1024,
-                    "num_inference_steps": 8, "guidance_scale": 5.0,
-                })
-                if result.success:
-                    image_assets.append(_make_img_asset(HERE, sc_id, out_path))
-                    print(f"    ✅ {sc_id}")
+            elif req_source == "source" and req_type == "image":
+                # User must provide a source image
+                img_paths = list(img_dir.glob(f"{sc_id}.*"))
+                found = [p for p in img_paths if p.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp")]
+                if found:
+                    p = found[0]
+                    image_assets.append({
+                        "id": f"img_{sc_id}",
+                        "type": "image",
+                        "path": str(p.relative_to(HERE)),
+                        "source_tool": "user_provided",
+                        "scene_id": sc_id,
+                        "generation_summary": f"User-provided image for {sc_id}",
+                    })
+                    print(f"    ✅ {sc_id}: source image present")
                 else:
-                    print(f"    ⚠ {sc_id}: failed — {result.error}")
-        else:
-            print("  ⚠ LocalDiffusion unavailable — no stand-in images generated")
+                    missing.append((sc_id, "source image", f"assets/images/{sc_id}.[jpg|png]"))
+                    print(f"    ⚠ {sc_id}: expects source image — missing")
 
-    # --- Also register any pre-existing images ---
+    if missing:
+        print(f"\n  ❌ {len(missing)} scene(s) require assets:\n")
+        for sc_id, kind, path_hint in missing:
+            scene_desc = next((s.get("description","") for s in scenes if s.get("id")==sc_id), "")
+            print(f"       {sc_id} ({kind}): {scene_desc[:80]}")
+            print(f"         → provide at:  {path_hint}")
+        print()
+        return False
+
+    # --- Register any additional pre-existing images ---
     for img_path in sorted(img_dir.iterdir()):
         if img_path.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp"):
             sc_id = img_path.stem
             if not any(a.get("scene_id") == sc_id for a in image_assets):
-                image_assets.append(_make_img_asset(HERE, sc_id, img_path))
+                image_assets.append({
+                    "id": f"img_{sc_id}",
+                    "type": "image",
+                    "path": str(img_path.relative_to(HERE)),
+                    "source_tool": "user_provided",
+                    "scene_id": sc_id,
+                    "generation_summary": f"Image for {sc_id}",
+                })
                 print(f"    ✅ Image: {img_path.name}")
 
-    if not have_sdxl:
-        print("    (set SDXL_MODEL_PATH or place DreamShaperXL at the default path to auto-generate images)")
-
     print(f"\n  Assets: {len(video_assets)} recordings, {len(image_assets)} images")
-
-    # --- Build Asset Manifest ---
-    assets = []
-    if narration_ready:
-        assets.append({
-            "id": "a_narration",
-            "type": "narration",
-            "path": str(narration_wav.relative_to(HERE)),
-            "source_tool": "piper_tts",
-            "scene_id": "global",
-            "generation_summary": "Generated Piper voice narration",
-        })
     assets.extend(video_assets)
     assets.extend(image_assets)
     if music_success:
