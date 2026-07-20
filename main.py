@@ -186,8 +186,8 @@ def cmd_setup():
 
     print("  Installing Python dependencies (via uv)...")
     run_cmd("uv pip install -r requirements.txt", cwd=OM)
-    print("  Installing Remotion composer (bun)...")
-    run_cmd("bun install", cwd=OM / "remotion-composer")
+    print("  Installing Remotion composer (npm)...")
+    run_cmd("npm install", cwd=OM / "remotion-composer")
     run_cmd(
         "uv pip install piper-tts 2>/dev/null || "
         "echo '  [skip] piper-tts — cloud TTS still works'"
@@ -325,7 +325,7 @@ def cmd_init(args):
 
     # Create a topic hint file so stages can reference it
     if topic:
-        info = {"project": project_name, "topic": topic, "pipeline": "animated-explainer"}
+        info = {"project": project_name, "topic": topic, "pipeline_type": "animated-explainer"}
         with open(proj_dir / "project.json", "w") as f:
             json.dump(info, f, indent=2)
 
@@ -385,12 +385,25 @@ def _write_checkpoint(proj_dir, project_name, stage, status, artifacts_dict):
     """Write a checkpoint via OpenMontage's checkpoint lib."""
     _ensure_om_imports()
     from lib.checkpoint import write_checkpoint
+
+    # Resolve pipeline_type from project.json marker
+    pipeline_type = None
+    marker_path = proj_dir / "project.json"
+    if marker_path.exists():
+        try:
+            with open(marker_path) as f:
+                marker = json.load(f)
+            pipeline_type = marker.get("pipeline_type") or marker.get("pipeline")
+        except (json.JSONDecodeError, OSError):
+            pass
+
     return write_checkpoint(
         pipeline_dir=proj_dir,
         project_id=project_name,
         stage=stage,
         status=status,
         artifacts=artifacts_dict,
+        pipeline_type=pipeline_type,
     )
 
 
@@ -705,110 +718,47 @@ def stage_assets(proj_dir):
             pass
 
 
-    # --- Scene Assets: check required assets ---
-    print("\n  Checking scene asset requirements...")
-    video_dir = _assets_path(proj_dir) / "videos"
+    # --- Scene assets: find existing images, skip generation ---
+    print("\n  Checking scene images...")
     img_dir = _assets_path(proj_dir) / "images"
-    video_dir.mkdir(parents=True, exist_ok=True)
     img_dir.mkdir(parents=True, exist_ok=True)
+    video_dir = _assets_path(proj_dir) / "videos"
+    video_dir.mkdir(parents=True, exist_ok=True)
     image_assets = []
     video_assets = []
-    missing = []
 
     scenes = scene_plan.get("scenes", [])
     for sc in scenes:
         sc_id = sc.get("id", "?")
-        for req in sc.get("required_assets", []):
-            req_type = req.get("type", "")
-            req_source = req.get("source", "")
+        existing = [p for p in img_dir.glob(f"{sc_id}.*")
+                    if p.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp")]
+        if existing:
+            p = existing[0]
+            image_assets.append({
+                "id": f"img_{sc_id}", "type": "image",
+                "path": str(p.relative_to(HERE)),
+                "source_tool": "user_provided", "scene_id": sc_id,
+            })
+            print(f"    ✅ {sc_id}: image present")
+        else:
+            print(f"    ℹ  {sc_id}: no image — using text card")
 
-            if req_source == "record" or req_type == "screen_recording":
-                # User must provide a screen recording
-                recording_path = video_dir / f"{sc_id}.mp4"
-                if recording_path.exists():
-                    video_assets.append({
-                        "id": f"vid_{sc_id}",
-                        "type": "video",
-                        "path": str(recording_path.relative_to(HERE)),
-                        "source_tool": "user_recording",
-                        "scene_id": sc_id,
-                        "generation_summary": f"User-provided recording for {sc_id}",
-                    })
-                    print(f"    ✅ {sc_id}: recording present")
-                else:
-                    missing.append((sc_id, "screen recording", f"assets/videos/{sc_id}.mp4"))
-                    print(f"    ⚠ {sc_id}: expects screen recording — missing")
-
-            elif req_source == "source" and req_type == "image":
-                # User must provide a source image
-                img_paths = list(img_dir.glob(f"{sc_id}.*"))
-                found = [p for p in img_paths if p.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp")]
-                if found:
-                    p = found[0]
-                    image_assets.append({
-                        "id": f"img_{sc_id}",
-                        "type": "image",
-                        "path": str(p.relative_to(HERE)),
-                        "source_tool": "user_provided",
-                        "scene_id": sc_id,
-                        "generation_summary": f"User-provided image for {sc_id}",
-                    })
-                    print(f"    ✅ {sc_id}: source image present")
-                else:
-                    missing.append((sc_id, "source image", f"assets/images/{sc_id}.[jpg|png]"))
-                    print(f"    ⚠ {sc_id}: expects source image — missing")
-
-    if missing:
-        print(f"\n  ❌ {len(missing)} scene(s) require assets:\n")
-        for sc_id, kind, path_hint in missing:
-            scene_desc = next((s.get("description","") for s in scenes if s.get("id")==sc_id), "")
-            print(f"       {sc_id} ({kind}): {scene_desc[:80]}")
-            print(f"         → provide at:  {path_hint}")
-        print()
-        return False
-
-    # --- Register any additional pre-existing images ---
-    for img_path in sorted(img_dir.iterdir()):
-        if img_path.suffix.lower() in (".jpg", ".jpeg", ".png", ".webp"):
-            sc_id = img_path.stem
-            if not any(a.get("scene_id") == sc_id for a in image_assets):
-                image_assets.append({
-                    "id": f"img_{sc_id}",
-                    "type": "image",
-                    "path": str(img_path.relative_to(HERE)),
-                    "source_tool": "user_provided",
-                    "scene_id": sc_id,
-                    "generation_summary": f"Image for {sc_id}",
-                })
-                print(f"    ✅ Image: {img_path.name}")
+    # Check for screen recordings
+    for sc in scenes:
+        sc_id = sc.get("id", "?")
+        recording_path = video_dir / f"{sc_id}.mp4"
+        if recording_path.exists():
+            video_assets.append({
+                "id": f"vid_{sc_id}", "type": "video",
+                "path": str(recording_path.relative_to(HERE)),
+                "source_tool": "user_recording", "scene_id": sc_id,
+            })
+            print(f"    ✅ {sc_id}: recording present")
 
     print(f"\n  Assets: {len(video_assets)} recordings, {len(image_assets)} images")
+    assets = []
     assets.extend(video_assets)
     assets.extend(image_assets)
-    if music_success:
-        assets.append({
-            "id": "a_music",
-            "type": "music",
-            "path": str(music_path.relative_to(HERE)),
-            "source_tool": "pixabay_music",
-            "scene_id": "global",
-            "generation_summary": "Downloaded background music",
-        })
-
-    asset_manifest = {
-        "version": "1.0",
-        "assets": assets,
-    }
-    print(f"\n  Manifest: {len(assets)} assets ({len(video_assets)} videos, {len(image_assets)} images, {'1 narration' if narration_ready else '0 narration'}, {'1 music' if music_success else '0 music'})")
-
-    art_dir = _artifact_path(proj_dir)
-    with open(art_dir / "asset_manifest.json", "w") as f:
-        json.dump(asset_manifest, f, indent=2)
-
-    _write_checkpoint(proj_dir, project_id, "assets", "completed",
-                       {"asset_manifest": asset_manifest})
-    print(f"  ✅ Assets checkpoint written\n")
-    return True
 
 
 def stage_edit(proj_dir):
@@ -827,6 +777,13 @@ def stage_edit(proj_dir):
         print("  ⚠ No asset_manifest.json found\n")
         return False
 
+    script = _read_artifact(proj_dir, "script.json")
+    script_by_id = {}
+    if script:
+        for s in script.get("sections", []):
+            sid = s.get("id")
+            if sid:
+                script_by_id[sid] = s.get("text", "")
     scenes = scene_plan.get("scenes", [])
     assets_list = asset_manifest.get("assets", [])
 
@@ -841,67 +798,106 @@ def stage_edit(proj_dir):
     cuts = []
     current_time = 0.0
 
+    # Build asset lookups by scene_id
+    scene_assets = {}  # scene_id -> asset
+    for asset in assets_list:
+        sid = asset.get("scene_id")
+        if sid:
+            scene_assets[sid] = asset
+
     for i, scene in enumerate(scenes):
         scene_id = scene.get("id", f"cut-{i+1}")
+        scene_type = scene.get("type", "")
         sec_id = scene.get("script_section_id", f"s{i+1}")
         dur = scene.get("end_seconds", 5.0) - scene.get("start_seconds", 0.0)
+        scene_asset = scene_assets.get(scene_id)
+        asset_path = scene_asset["path"] if scene_asset else None
+        asset_type = scene_asset.get("type") if scene_asset else None
         if dur <= 0:
             dur = 5.0
-
-        # Find matching image asset by scene_id
-        img_asset = None
-        for ia in image_assets:
-            if scene_id in ia.get("id", "") or scene_id in ia.get("scene_id", ""):
-                img_asset = ia
-                break
-
+        # Build content text: use script section text, fall back to description
+        section_id = scene.get("script_section_id", "")
+        script_text = script_by_id.get(section_id, "").strip()
+        desc = scene.get("description", "") or ""
+        overlay = scene.get("overlay_notes", "") or ""
+        content_text = script_text or desc or overlay or ""
         out_seconds = round(current_time + dur, 2)
 
-        # Determine cut type based on scene position
-        if i == 0:
-            # First scene: hero title card
-            overlay_notes = scene.get("overlay_notes", "")
-            cut = {
-                "id": f"cut_{scene_id}",
-                "type": "hero_title",
-                "source": "",
-                "in_seconds": round(current_time, 2),
-                "out_seconds": out_seconds,
-                "text": sec_id.replace("-", " ").title(),
-                "heroSubtitle": overlay_notes[:200] if overlay_notes else scene.get("description", "")[:200],
-                "backgroundVideo": None,
-                "backgroundOverlay": 0.4,
-            }
-            if img_asset:
-                cut["backgroundImage"] = img_asset["path"]
-        elif i == len(scenes) - 1:
-            # Last scene: callout recap
-            cut = {
-                "id": f"cut_{scene_id}",
-                "type": "callout",
-                "source": "",
-                "in_seconds": round(current_time, 2),
-                "out_seconds": out_seconds,
-                "text": scene.get("overlay_notes", scene.get("description", ""))[:300],
-                "title": sec_id.replace("-", " ").title(),
-                "callout_type": "info",
-                "backgroundOverlay": 0.5,
-            }
-            if img_asset:
-                cut["backgroundImage"] = img_asset["path"]
-        else:
-            # Middle scenes: image with ken-burns animation
-            cut = {
-                "id": f"cut_{scene_id}",
-                "type": "Img",
-                "in_seconds": round(current_time, 2),
-                "out_seconds": out_seconds,
-                "animation": "ken-burns",
-            }
-            if img_asset:
-                cut["source"] = img_asset["id"]
+        # Determine cut type and props based on scene type
+        cut = {
+            "id": f"cut_{scene_id}",
+            "source": "",
+            "in_seconds": round(current_time, 2),
+            "out_seconds": out_seconds,
+        }
+
+        if scene_type == "hero_title" or scene_type == "title_card":
+            cut["type"] = "hero_title"
+            cut["text"] = desc[:120] or sec_id.replace("-", " ").title()
+            cut["heroSubtitle"] = overlay[:300] if overlay else ""
+            cut["backgroundOverlay"] = 0.4
+            if asset_path:
+                cut["backgroundImage"] = asset_path
+
+        elif scene_type == "text_card":
+            cut["type"] = "text_card"
+            cut["text"] = content_text[:500]
+            cut["backgroundOverlay"] = 0.4
+            if asset_path:
+                cut["backgroundImage"] = asset_path
+
+        elif scene_type == "screen_recording":
+            # Prefer video asset; fall back to image; last resort text_card
+            if asset_path and asset_type == "video":
+                cut["source"] = asset_path
+            elif asset_path and asset_type == "image":
+                cut["type"] = "Img"
+                cut["source"] = asset_path
+                cut["animation"] = "ken-burns"
             else:
-                cut["source"] = ""
+                cut["type"] = "text_card"
+                cut["text"] = content_text[:500]
+                cut["backgroundOverlay"] = 0.4
+
+        elif scene_type == "diagram":
+            # Show diagram image, or fall back to text_card
+            if asset_path and asset_type == "image":
+                cut["type"] = "Img"
+                cut["source"] = asset_path
+                cut["animation"] = "ken-burns"
+            else:
+                cut["type"] = "text_card"
+                cut["text"] = content_text[:500]
+                cut["backgroundOverlay"] = 0.4
+
+        elif scene_type == "callout":
+            cut["type"] = "callout"
+            cut["text"] = content_text[:400]
+            cut["title"] = sec_id.replace("-", " ").title()
+            cut["callout_type"] = "info"
+            cut["backgroundOverlay"] = 0.5
+            if asset_path:
+                cut["backgroundImage"] = asset_path
+
+        elif scene_type in ("broll", "image_card", "b-roll"):
+            # B-roll / image montage: show image with animation
+            cut["type"] = "Img"
+            cut["animation"] = "ken-burns"
+            if asset_path:
+                cut["source"] = asset_path
+            else:
+                # No image asset — show as text_card with description
+                cut["type"] = "text_card"
+                cut["text"] = content_text[:500]
+                cut["backgroundOverlay"] = 0.4
+
+        else:
+            # Default: text_card with description
+            cut["type"] = "text_card"
+            cut["text"] = content_text[:500]
+            cut["backgroundOverlay"] = 0.4
+            if asset_path and asset_type == "image":
+                cut["backgroundImage"] = asset_path
 
         cuts.append(cut)
         current_time += dur
@@ -920,14 +916,52 @@ def stage_edit(proj_dir):
             "volume": 0.3,
             "ducking": {"enabled": True, "reduction_db": 6.0},
         }
+    # Resolve render runtime and family from pipeline type
+    pipeline_type = None
+    marker_path = proj_dir / "project.json"
+    if marker_path.exists():
+        try:
+            with open(marker_path) as f:
+                marker = json.load(f)
+            pipeline_type = marker.get("pipeline_type") or marker.get("pipeline")
+        except (json.JSONDecodeError, OSError):
+            pass
+    _RUNTIME_BY_PIPELINE = {
+        "animated-explainer": "remotion",
+        "cinematic": "remotion",
+        "animation": "hyperframes",
+        "screen-demo": "remotion",
+        "talking-head": "remotion",
+        "hybrid": "remotion",
+        "documentary-montage": "remotion",
+        "podcast-repurpose": "remotion",
+        "clip-factory": "remotion",
+        "localization-dub": "remotion",
+        "avatar-spokesperson": "remotion",
+        "character-animation": "hyperframes",
+    }
+    _FAMILY_BY_PIPELINE = {
+        "animated-explainer": "explainer-data",
+        "cinematic": "cinematic-trailer",
+        "animation": "explainer-data",
+        "screen-demo": "explainer-data",
+        "talking-head": "presenter",
+        "hybrid": "explainer-data",
+        "documentary-montage": "cinematic-trailer",
+    }
+    render_runtime = _RUNTIME_BY_PIPELINE.get(pipeline_type, "remotion")
+    renderer_family = _FAMILY_BY_PIPELINE.get(pipeline_type, "explainer-data")
 
     edit_decisions = {
         "version": "1.0",
         "cuts": cuts,
         "audio": audio_config,
-        "render_runtime": "remotion",
-        "renderer_family": "explainer-data",
-        "metadata": {"generated_by": "run.py edit stage"},
+        "render_runtime": render_runtime,
+        "renderer_family": renderer_family,
+        "metadata": {
+            "generated_by": "run.py edit stage",
+            "pipeline_type": pipeline_type,
+        },
     }
 
     art_dir = _artifact_path(proj_dir)
@@ -1060,9 +1094,10 @@ def stage_compose(proj_dir):
             "asset_manifest": asset_manifest,
             "output_path": str(output_path),
         }
-
         runtime = edit_decisions.get("render_runtime", "remotion")
-        print(f"    Using runtime: {runtime}")
+        family = edit_decisions.get("renderer_family", "?")
+        pipeline = edit_decisions.get("metadata", {}).get("pipeline_type", "?")
+        print(f"    Runtime: {runtime}  |  Renderer: {family}  |  Pipeline: {pipeline}")
 
         compose_result = composer.execute(compose_inputs)
         if compose_result.success:
@@ -1073,7 +1108,7 @@ def stage_compose(proj_dir):
             return False
     except Exception as e:
         print(f"    ⚠ Video composition unavailable: {e}")
-        print(f"    Install Remotion dependencies: cd OpenMontage/remotion-composer && bun install\n")
+        print(f"    Install Remotion dependencies: cd OpenMontage/remotion-composer && npm install\n")
         return False
 
     # --- Write Render Report ---

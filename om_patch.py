@@ -1,10 +1,27 @@
+import locale
+import traceback
+import os
 import sys
 import json
 import subprocess
 import shutil
-import os
 from pathlib import Path
 
+try:
+    locale.setlocale(locale.LC_ALL, "C.UTF-8")
+except locale.Error:
+    try:
+        locale.setlocale(locale.LC_ALL, "en_US.UTF-8")
+    except locale.Error:
+        pass
+# Force UTF-8 for all subprocesses
+os.environ["PYTHONIOENCODING"] = "utf-8"
+os.environ["LANG"] = "en_US.UTF-8"
+os.environ["PYTHONUTF8"] = "1"
+# Prevent huggingface_hub from making HTTP requests (we load local models only)
+os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"
+os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
 # Browser Path Overrides for Playwright/Mule browser
 os.environ["PRODUCER_HEADLESS_SHELL_PATH"] = "/home/pannet1/.cache/ms-playwright/chromium-1228/chrome-linux64/chrome"
 os.environ["PUPPETEER_EXECUTABLE_PATH"] = "/home/pannet1/.cache/ms-playwright/chromium-1228/chrome-linux64/chrome"
@@ -50,16 +67,13 @@ def patched_load_playbook(name: str, styles_dir=None) -> dict:
 styles.playbook_loader.load_playbook = patched_load_playbook
 print("[OM Patch] In-memory load_playbook patched to search parent styles directory first.")
 
-# 2. Patch VideoCompose._remotion_available to support bunx
+# 2. Patch VideoCompose._remotion_available to require npx
 original_remotion_available = VideoCompose._remotion_available
 
 def patched_remotion_available(self) -> bool:
-    npx_bin = shutil.which("npx")
-    bunx_bin = "/home/pannet1/.bun/bin/bunx" if Path("/home/pannet1/.bun/bin/bunx").exists() else shutil.which("bunx")
-    
-    if not (npx_bin or bunx_bin):
+    if not shutil.which("npx"):
         return False
-        
+
     composer_dir = PROJECT_ROOT / "remotion-composer"
     if not composer_dir.exists() or not (composer_dir / "package.json").exists():
         return False
@@ -68,18 +82,16 @@ def patched_remotion_available(self) -> bool:
     return True
 
 VideoCompose._remotion_available = patched_remotion_available
-print("[OM Patch] VideoCompose._remotion_available patched to support bunx.")
+print("[OM Patch] VideoCompose._remotion_available patched to require npx.")
 
-# 3. Patch VideoCompose._remotion_render to handle 'projects/' paths and use bunx if npx is missing
+# 3. Patch VideoCompose._remotion_render to handle 'projects/' paths
 def patched_remotion_render(self, inputs: dict) -> ToolResult:
-    npx_bin = shutil.which("npx")
-    bunx_bin = "/home/pannet1/.bun/bin/bunx" if Path("/home/pannet1/.bun/bin/bunx").exists() else shutil.which("bunx")
-    runner = npx_bin or bunx_bin
-    
+    runner = shutil.which("npx")
+
     if not runner:
         return ToolResult(
             success=False,
-            error="npx or bunx not found. Install Node.js or Bun to use Remotion rendering.",
+            error="npx not found. Install Node.js to use Remotion rendering.",
         )
 
     composition_data = inputs.get("edit_decisions") or inputs.get("composition_data")
@@ -155,7 +167,7 @@ def patched_remotion_render(self, inputs: dict) -> ToolResult:
             pass
 
     try:
-        self.run_command(cmd, timeout=1800, cwd=composer_dir)
+        self.run_command(cmd, timeout=None, cwd=composer_dir)
     except subprocess.CalledProcessError as e:
         error_msg = f"Remotion render failed: {e}\nStdout: {e.stdout}\nStderr: {e.stderr}"
         return ToolResult(success=False, error=error_msg)
@@ -165,47 +177,7 @@ def patched_remotion_render(self, inputs: dict) -> ToolResult:
     return ToolResult(success=True, data={"output_path": str(output_path)})
 
 VideoCompose._remotion_render = patched_remotion_render
-print("[OM Patch] VideoCompose._remotion_render patched to handle projects/ path routing and support Bun/bunx.")
-
-# 4. Patch HyperFramesCompose to support global Bun-installed hyperframes execution
-try:
-    from tools.video.hyperframes_compose import HyperFramesCompose
-    
-    HyperFramesCompose._NODE_FLOOR_MAJOR = 20
-    original_runtime_check = HyperFramesCompose._runtime_check
-    original_run_hf = HyperFramesCompose._run_hf
-    
-    def patched_runtime_check(self) -> dict:
-        check = original_runtime_check(self)
-        bun_hf = Path("/home/pannet1/.bun/bin/hyperframes")
-        if bun_hf.exists():
-            check["runtime_available"] = check["ffmpeg_available"]
-            check["npx_available"] = True
-            check["reasons"] = [r for r in check["reasons"] if "ffmpeg" in r]
-        return check
-        
-    def patched_run_hf(self, args, *, cwd, timeout, check):
-        bun_hf = Path("/home/pannet1/.bun/bin/hyperframes")
-        if bun_hf.exists():
-            cmd = [str(bun_hf), *args]
-            try:
-                return subprocess.run(
-                    cmd,
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout,
-                    cwd=str(cwd) if cwd else None,
-                    check=False,
-                )
-            except Exception:
-                pass
-        return original_run_hf(self, args, cwd=cwd, timeout=timeout, check=check)
-        
-    HyperFramesCompose._runtime_check = patched_runtime_check
-    HyperFramesCompose._run_hf = patched_run_hf
-    print("[OM Patch] HyperFramesCompose runtime check and CLI run patched for Bun-installed hyperframes.")
-except Exception as e:
-    print(f"[OM Patch] Failed to patch HyperFramesCompose: {e}")
+print("[OM Patch] VideoCompose._remotion_render patched to handle projects/ path routing.")
 
 # 5. Register custom FishSpeechTTS tool
 try:
@@ -216,113 +188,3 @@ try:
 except Exception as e:
     print(f"[OM Patch] Failed to register custom FishSpeechTTS: {e}")
 
-# 6. Patch LocalDiffusion to use local SDXL .safetensors model automatically
-#    No config needed — drops in place of external API image providers.
-try:
-    import os as _os
-    from pathlib import Path as _Path
-    from tools.base_tool import ToolResult, ToolStatus
-    from tools.graphics.local_diffusion import LocalDiffusion
-
-    # Default local SDXL model path — override via SDXL_MODEL_PATH env var
-    _SDXL_DEFAULT = _os.environ.get(
-        "SDXL_MODEL_PATH",
-        _os.path.expanduser("~/Downloads/DreamShaperXL_Lightning.safetensors"),
-    )
-    _SDXL_PATH = _Path(_SDXL_DEFAULT)
-
-    # Patch get_status — AVAILABLE when model file exists + diffusers installed
-    _orig_status = LocalDiffusion.get_status
-
-    def _patched_status(self) -> ToolStatus:
-        if not _SDXL_PATH.exists():
-            return _orig_status(self)
-        try:
-            import diffusers  # noqa: F401
-            import torch  # noqa: F401
-            return ToolStatus.AVAILABLE
-        except ImportError:
-            return ToolStatus.UNAVAILABLE
-
-    LocalDiffusion.get_status = _patched_status
-
-    # Patch input_schema default model to local SDXL path
-    LocalDiffusion.input_schema["properties"]["model"]["default"] = str(_SDXL_PATH)
-
-    # Patch execute — use SDXL from single file when model is a .safetensors path
-    _orig_exec = LocalDiffusion.execute
-
-    def _patched_exec(self, inputs: dict) -> ToolResult:
-        model_id = inputs.get("model", str(_SDXL_PATH))
-        prompt = inputs["prompt"]
-        negative = inputs.get("negative_prompt", "")
-        width = inputs.get("width", 1024)
-        height = inputs.get("height", 1024)
-        seed = inputs.get("seed")
-        steps = inputs.get("num_inference_steps", 8)
-        guidance = inputs.get("guidance_scale", 5.0)
-
-        if model_id.endswith(".safetensors"):
-            import time
-            import torch
-            from diffusers import StableDiffusionXLPipeline, DPMSolverMultistepScheduler
-
-            model_path = _Path(model_id)
-            if not model_path.exists():
-                return ToolResult(
-                    success=False,
-                    error=f"Model file not found: {model_id}",
-                )
-            try:
-                start = time.time()
-                pipe = StableDiffusionXLPipeline.from_single_file(
-                    str(model_path),
-                    torch_dtype=torch.float16,
-                    use_safetensors=True,
-                )
-                pipe.scheduler = DPMSolverMultistepScheduler.from_config(pipe.scheduler.config)
-                pipe.set_progress_bar_config(disable=True)
-                pipe.enable_model_cpu_offload()
-
-                generator = None
-                if seed is not None:
-                    generator = torch.Generator(device="cuda").manual_seed(seed)
-
-                image = pipe(
-                    prompt,
-                    negative_prompt=negative,
-                    width=width,
-                    height=height,
-                    num_inference_steps=steps,
-                    guidance_scale=guidance,
-                    generator=generator,
-                ).images[0]
-
-                output_path = _Path(inputs.get("output_path", "generated_image.png"))
-                output_path.parent.mkdir(parents=True, exist_ok=True)
-                image.save(str(output_path))
-
-                return ToolResult(
-                    success=True,
-                    data={
-                        "provider": "local_diffusion",
-                        "model": model_id,
-                        "prompt": prompt,
-                        "output": str(output_path),
-                    },
-                    artifacts=[str(output_path)],
-                    cost_usd=0.0,
-                    duration_seconds=round(time.time() - start, 2),
-                    seed=seed,
-                    model=model_id,
-                )
-            except Exception as e:
-                return ToolResult(success=False, error=f"SDXL local generation failed: {e}")
-
-        # Fall through to original for hub models
-        return _orig_exec(self, inputs)
-
-    LocalDiffusion.execute = _patched_exec
-    print("[OM Patch] LocalDiffusion patched — auto-uses local SDXL .safetensors model.")
-except Exception as e:
-    print(f"[OM Patch] Failed to patch LocalDiffusion: {e}")

@@ -37,8 +37,8 @@ def _setup():
 
     print("  Installing Python dependencies (via uv)...")
     run_cmd("uv pip install -r requirements.txt", cwd=OM)
-    print("  Installing Remotion composer (bun)...")
-    run_cmd("bun install", cwd=OM / "remotion-composer")
+    print("  Installing Remotion composer (npm)...")
+    run_cmd("npm install", cwd=OM / "remotion-composer")
     run_cmd(
         "uv pip install piper-tts 2>/dev/null || "
         "echo '  [skip] piper-tts — cloud TTS still works'"
