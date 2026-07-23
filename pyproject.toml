@@ -14,8 +14,11 @@ dependencies = [
     "diffusers>=0.25.0",
     "transformers>=4.40",
     "torch==2.6.0",
+    "torchvision>=0.20.0",
     "accelerate>=0.30",
     "safetensors>=0.4",
+    "numpy>=1.24",
+    "tqdm>=4.64",
 ]
 
 [project.scripts]
@@ -24,6 +27,8 @@ list = "list:main"
 init = "init:main"
 status = "status:main"
 stage = "stage:main"
+gen = "local_image_gen.__main__:main"
+download-model = "local_image_gen.download:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -33,11 +38,3 @@ build-backend = "hatchling.build"
 only-include = ["*.py", "custom_tools/"]
 
 [tool.uv]
-
-[tool.uv.sources]
-torch = { index = "pytorch-cu124" }
-
-[[tool.uv.index]]
-name = "pytorch-cu124"
-url = "https://download.pytorch.org/whl/cu124"
-explicit = true
